@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"github.com/gin-gonic/gin"
 	"github.com/go-playground/validator/v10"
@@ -12,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 )
 
 func main() {
@@ -31,6 +33,7 @@ func main() {
 	// Setup Router
 	router.SetupRouter(&app.RouterGroup, validate)
 
+	// create http server
 	httpServer := &http.Server{
 		Addr:    fmt.Sprintf(":%d", config.Port()),
 		Handler: app,
@@ -47,11 +50,13 @@ func main() {
 		for {
 			select {
 			case <-chanSignal:
-				logrus.Warn("receive interrupt signal")
+				logrus.Warn("receive interrupt signal ⚠️")
+				gracefullShutdown(httpServer)
 				chanQuit <- struct{}{}
 				return
 			case e := <-chanErr:
 				logrus.Errorf("receive error signal : %s", e.Error())
+				gracefullShutdown(httpServer)
 				chanQuit <- struct{}{}
 				return
 			}
@@ -60,14 +65,14 @@ func main() {
 
 	// spawn goroutine : runs http server
 	go func() {
-		logrus.Infof("Start HTTP Server Listening on Port %d", config.Port())
+		logrus.Infof("Start HTTP Server Listening on Port %d ⏳", config.Port())
 		if err := httpServer.ListenAndServe(); err != nil {
 			chanErr <- err
 			return
 		}
 	}()
 
-	// wait chanQuit
+	// waiting interrupt
 	_ = <-chanQuit
 
 	// close all channels
@@ -75,5 +80,21 @@ func main() {
 	close(chanErr)
 	close(chanSignal)
 
-	logrus.Infof("Server Has Exited")
+	logrus.Infof("Server Has Exited 🛑")
+}
+
+func gracefullShutdown(httpServer *http.Server) {
+	if httpServer != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		if err := httpServer.Shutdown(ctx); err != nil {
+			_ = httpServer.Close()
+			logrus.Warn("force close HTTP Server ⚠️")
+			return
+		}
+
+		_ = httpServer.Close()
+		logrus.Infof("gracefull shutdown HTTP Server ❎")
+	}
 }
