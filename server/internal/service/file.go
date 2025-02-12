@@ -3,6 +3,7 @@ package service
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"github.com/go-playground/validator/v10"
 	"github.com/sirupsen/logrus"
@@ -11,12 +12,15 @@ import (
 	"go-upload-chunk/server/internal/utils"
 	"io"
 	"os"
+	"path/filepath"
+	_ "path/filepath"
 )
 
 type fileService struct {
 	validate *validator.Validate
 }
 
+// UploadChunk uploads one chunk file, combines to one file
 func (f *fileService) UploadChunk(ctx context.Context, request entity.UploadChunkRequestServiceDTO) error {
 	logger := logrus.WithContext(ctx)
 
@@ -37,29 +41,48 @@ func (f *fileService) UploadChunk(ctx context.Context, request entity.UploadChun
 		return err
 	}
 
-	// check file chunk if it isn't exists
-	filepath := fmt.Sprintf("%s/%s-chunk-%d", config.FolderUploadChunk(), requestHeader.Filename, requestHeader.ChunkIndex)
-	if _, err := os.Stat(filepath); os.IsNotExist(err) {
-		newFile, err := os.Create(filepath)
+	// check file chunk if it isn't exists then create new file chunk
+	filePath := fmt.Sprintf("%s/%s-chunk-%d", config.FolderUploadChunk(), requestHeader.Filename, requestHeader.ChunkIndex)
+	if _, err := os.Stat(filePath); os.IsNotExist(err) {
+		var newChunkFile *os.File
+
+		// create new chunk file
+		newChunkFile, err = os.Create(filePath)
 		if err != nil {
 			logger.Error(err)
 			return err
 		}
 
-		defer newFile.Close()
-
-		if _, err = newFile.Write(content.Bytes()); err != nil {
+		// write content to new chunk files
+		if _, err = newChunkFile.Write(content.Bytes()); err != nil {
 			logger.Error(err)
+
+			// don't forget to close chunk
+			_ = newChunkFile.Close()
+
 			return nil
 		}
+
+		// don't forget to close chunk
+		_ = newChunkFile.Close()
 	}
 
 	// file chunk already exists, then check total chunk file
+	filePathPrefix := fmt.Sprintf("%s/%s-chunk-", config.FolderUploadChunk(), requestHeader.Filename)
 	var totalChunkFiles int
+	matchFiles, err := filepath.Glob(filePathPrefix)
+	if err != nil {
+		logger.Error(err)
+		return err
+	}
+
+	// count total chunk files in local folder upload
+	for _, _ = range matchFiles {
+		totalChunkFiles++
+	}
 
 	// if total files number is same as we expect, then combine mutiple chunk into a one file
 	if totalChunkFiles == requestHeader.TotalChunk {
-		// looping each file -> combine multiple files into a one file
 		// create new file in folder upload/final
 		fp := fmt.Sprintf("%s/%s", config.FolderUploadChunk(), requestHeader.Filename)
 		finalFile, err := os.Create(fp)
@@ -70,6 +93,7 @@ func (f *fileService) UploadChunk(ctx context.Context, request entity.UploadChun
 
 		defer finalFile.Close()
 
+		// looping each chunk file, combine to final file
 		for i := 0; i < totalChunkFiles; i++ {
 			// open file
 			fileChunkOneFilePath := fmt.Sprintf("%s/%s-chunk-%d", config.FolderUploadChunk(), requestHeader.Filename, i)
@@ -81,7 +105,7 @@ func (f *fileService) UploadChunk(ctx context.Context, request entity.UploadChun
 
 			// get buffer from Pool
 			bufOneChunk := utils.ByteBufferPool.Get().(*bytes.Buffer)
-			if _, err := io.Copy(bufOneChunk, fileChunkOneFile); err != nil {
+			if _, err = io.Copy(bufOneChunk, fileChunkOneFile); err != nil {
 				logger.Error(err)
 
 				// reset buffer
@@ -92,7 +116,8 @@ func (f *fileService) UploadChunk(ctx context.Context, request entity.UploadChun
 				return err
 			}
 
-			if _, err := finalFile.Write(bufOneChunk.Bytes()); err != nil {
+			// write from buffer to final file
+			if _, err = finalFile.Write(bufOneChunk.Bytes()); err != nil {
 				logger.Error(err)
 				return err
 			}
@@ -103,6 +128,25 @@ func (f *fileService) UploadChunk(ctx context.Context, request entity.UploadChun
 			// don't forget to close file on chunk
 			_ = fileChunkOneFile.Close()
 		}
+
+		logger.Info("success combine fine")
+
+		// validate check sum from final file
+		h := sha256.New()
+		if _, err = io.Copy(h, finalFile); err != nil {
+			logger.Error(err)
+			return err
+		}
+
+		// compare checksum
+		checkSumFinalFile := fmt.Sprintf("%x", h.Sum(nil))
+		if checkSumFinalFile != requestHeader.CheckSum {
+			return fmt.Errorf("invalid checksum")
+		}
+
+		// upload to Cloud
+		logger.Info("process upload final file to cloud")
+		logger.Info("success upload final file to cloud")
 	}
 
 	return nil
