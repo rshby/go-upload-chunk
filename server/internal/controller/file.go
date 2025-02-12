@@ -7,10 +7,15 @@ import (
 	"go-upload-chunk/server/internal/entity"
 	"go-upload-chunk/server/internal/utils"
 	"io"
+	"net/http"
 )
 
 type FileController struct {
 	fileService entity.FileService
+}
+
+func NewFileController(fileService entity.FileService) *FileController {
+	return &FileController{fileService: fileService}
 }
 
 // UploadChunk uploads file for chunks
@@ -40,4 +45,7 @@ func (f *FileController) UploadChunk(c *gin.Context) {
 	}
 
 	// success upload chunk
+	c.JSON(http.StatusOK, gin.H{
+		"message": "success upload",
+	})
 }

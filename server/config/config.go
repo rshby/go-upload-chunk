@@ -37,3 +37,8 @@ func Port() int {
 func FolderUploadChunk() string {
 	return GetEnv("FOLDER_UPLOAD_CHUNK")
 }
+
+// FolderUploadFinal retrieves path folder to save final file
+func FolderUploadFinal() string {
+	return GetEnv("FOLDER_UPLOAD_FINAL")
+}

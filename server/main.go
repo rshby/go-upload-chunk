@@ -3,9 +3,11 @@ package main
 import (
 	"fmt"
 	"github.com/gin-gonic/gin"
+	"github.com/go-playground/validator/v10"
 	"github.com/sirupsen/logrus"
 	"go-upload-chunk/server/config"
 	"go-upload-chunk/server/drivers/logger"
+	"go-upload-chunk/server/http/router"
 	"net/http"
 	"os"
 	"os/signal"
@@ -22,6 +24,12 @@ func main() {
 	default:
 		gin.SetMode(gin.DebugMode)
 	}
+
+	// init validator
+	validate := validator.New()
+
+	// Setup Router
+	router.SetupRouter(&app.RouterGroup, validate)
 
 	httpServer := &http.Server{
 		Addr:    fmt.Sprintf(":%d", config.Port()),

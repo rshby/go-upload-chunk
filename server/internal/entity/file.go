@@ -14,7 +14,7 @@ type FileService interface {
 type RequestHeaderDTO struct {
 	Filename   string `json:"filename" validate:"required"`
 	CheckSum   string `json:"check_sum" validate:"required"`
-	ChunkIndex int    `json:"chunk_index" validate:"required"`
+	ChunkIndex int    `json:"chunk_index"`
 	TotalChunk int    `json:"total_chunk" validate:"required"`
 }
 
