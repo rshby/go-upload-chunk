@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"github.com/sirupsen/logrus"
 	"go-upload-chunk/server/drivers/logger"
@@ -10,13 +11,17 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"sync"
 )
 
 func main() {
 	logger.SetupLogger()
 
-	filename := "tujuan_paket.pdf"
-	totalChunk := 5
+	var (
+		filename   = "sample.jpeg"
+		totalChunk = 100
+		mu         = &sync.Mutex{}
+	)
 
 	// open file
 	f, err := os.Open(fmt.Sprintf("./upload/%s", filename))
@@ -25,13 +30,6 @@ func main() {
 	}
 
 	defer f.Close()
-
-	// create checksum final file
-	h := sha256.New()
-	if _, err = io.Copy(h, f); err != nil {
-		logrus.Fatal(err)
-	}
-	checksum := fmt.Sprintf("%x", h.Sum(nil))
 
 	fileInfo, err := f.Stat()
 	if err != nil {
@@ -45,31 +43,58 @@ func main() {
 
 	// read and upload each chunk
 	for i := 0; i < totalChunk; i++ {
-		start := int64(i) * chunkSize
-		end := start + chunkSize
+		// lock mutex
+		mu.Lock()
+
+		var (
+			start = int64(i) * chunkSize
+			end   int64
+		)
+
 		if i == totalChunk-1 {
+			// last chunk
 			end = fileSize
+		} else {
+			end = start + chunkSize
 		}
 
-		_, _ = f.Seek(start, io.SeekStart)
+		// set offset to start value
+		if _, err = f.Seek(start, io.SeekStart); err != nil {
+			logrus.Errorf("Error seeking to chunk %d: %v", i, err)
+			break
+		}
 
-		// read chunk
-		buf := make([]byte, end-start)
-		if _, err = f.Read(buf); err != nil {
+		// read per chunk and save []byte to variable content
+		content := make([]byte, end-start)
+		if _, err = f.Read(content); err != nil {
 			logrus.Error(err)
 			break
 		}
 
 		// upload each chunk
-		uploadChunk(filename, buf, checksum, strconv.Itoa(i), strconv.Itoa(totalChunk))
+		uploadChunk(filename, content, strconv.Itoa(i), strconv.Itoa(totalChunk))
+		content = nil
+
+		// unlock mutex
+		mu.Unlock()
 	}
 
 	logrus.Infof("success upload")
 }
 
-func uploadChunk(filename string, content []byte, checksum, chunkIndex, totalChunk string) {
+// uploadChunk uploads file for each chunk
+func uploadChunk(filename string, content []byte, chunkIndex, totalChunk string) {
 	// create http client
 	httpClient := &http.Client{}
+
+	// create checksum
+	hashChecksum := sha256.New()
+	if _, err := io.Copy(hashChecksum, bytes.NewReader(content)); err != nil {
+		logrus.Error(err)
+		return
+	}
+
+	checksum := hex.EncodeToString(hashChecksum.Sum(nil))
 
 	// create http request
 	req, err := http.NewRequest(http.MethodPost, "http://localhost:4000/v1/file/chunk", bytes.NewReader(content))
@@ -84,8 +109,6 @@ func uploadChunk(filename string, content []byte, checksum, chunkIndex, totalChu
 	req.Header.Add("check-sum", checksum)
 	req.Header.Add("chunk-index", chunkIndex)
 	req.Header.Add("total-chunk", totalChunk)
-
-	logrus.Infof("check sum : %s", checksum)
 
 	// execute http call
 	resp, err := httpClient.Do(req)

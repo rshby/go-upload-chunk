@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	gootel "github.com/erajayatech/go-opentelemetry/v2"
 	"github.com/go-playground/validator/v10"
@@ -40,9 +41,39 @@ func (f *fileService) UploadChunk(ctx context.Context, request entity.UploadChun
 	}
 
 	var (
-		requestHeader = request.RequestHeader
-		content       = request.Content
+		requestHeader   = request.RequestHeader
+		totalChunkFiles int
 	)
+
+	hashChecksum := sha256.New()
+	content := io.TeeReader(request.Content, hashChecksum)
+
+	// get buffer from Pool
+	buf := utils.ByteBufferPool.Get().(*bytes.Buffer)
+	defer func() {
+		buf.Reset()
+		utils.ByteBufferPool.Put(buf)
+	}()
+
+	// copy from content to buf. content will be empty
+	if _, err := io.Copy(buf, content); err != nil {
+		logger.Error(err)
+		return err
+	}
+
+	// copy from buf to request.Content, buf will be empty
+	if _, err := io.Copy(request.Content, buf); err != nil {
+		logger.Error(err)
+		return err
+	}
+
+	// validate checksum
+	checksum := hex.EncodeToString(hashChecksum.Sum(nil))
+	if checksum != requestHeader.CheckSum {
+		err := fmt.Errorf("invalid checksum ‼️")
+		logger.Error(err)
+		return err
+	}
 
 	// check local folder chunk
 	if err := f.CheckAndCreateFolder(ctx, config.FolderUploadChunk()); err != nil {
@@ -50,109 +81,38 @@ func (f *fileService) UploadChunk(ctx context.Context, request entity.UploadChun
 		return err
 	}
 
-	// check file chunk if it isn't exists then create new file chunk
+	// check file chunk if already exists
 	filePath := fmt.Sprintf("%s/%s-chunk-%d", config.FolderUploadChunk(), requestHeader.Filename, requestHeader.ChunkIndex)
-	if _, err := os.Stat(filePath); os.IsNotExist(err) {
-		var newChunkFile *os.File
-
-		// create new chunk file
-		newChunkFile, err = os.Create(filePath)
-		if err != nil {
-			logger.Error(err)
-			return err
-		}
-
-		// write content to new chunk files
-		if _, err = newChunkFile.Write(content.Bytes()); err != nil {
-			logger.Error(err)
-
-			// don't forget to close chunk
-			_ = newChunkFile.Close()
-
-			return nil
-		}
-
-		// don't forget to close chunk
-		_ = newChunkFile.Close()
+	if _, err := os.Stat(filePath); err == nil {
+		logger.Infof("chuck file already exists 📩")
+		return nil
 	}
 
-	// file chunk already exists, then check total chunk file
-	filePathPrefix := fmt.Sprintf("%s/%s-chunk-*", config.FolderUploadChunk(), requestHeader.Filename)
-	var totalChunkFiles int
+	// create new chunk file
+	if err := f.CreateChunkFile(ctx, request); err != nil {
+		logger.Error(err)
+		return err
+	}
 
-	logger.Infof("filepath chunk : [%s]", filePathPrefix)
+	// find all files by given prefix path
+	filePathPrefix := fmt.Sprintf("%s/%s-chunk-*", config.FolderUploadChunk(), requestHeader.Filename)
 	matchFiles, err := filepath.Glob(filePathPrefix)
 	if err != nil {
 		logger.Error(err)
 		return err
 	}
 
-	// count total chunk files in local folder upload
+	// count total chunk files
 	for _, _ = range matchFiles {
 		totalChunkFiles++
 	}
 
-	logger.Infof("total chunk files : %d", totalChunkFiles)
-
 	// if total files number is same as we expect, then combine mutiple chunk into a one file
 	if totalChunkFiles == requestHeader.TotalChunk {
-		// check folder final
-		if err = f.CheckAndCreateFolder(ctx, config.FolderUploadFinal()); err != nil {
+		if err = f.CreateFinalFile(ctx, request); err != nil {
 			logger.Error(err)
 			return err
 		}
-
-		// create new final file inside folder ./upload/final
-		fp := fmt.Sprintf("%s/%s", config.FolderUploadFinal(), requestHeader.Filename)
-		finalFile, err := os.Create(fp)
-		if err != nil {
-			logger.Error(err)
-			return err
-		}
-
-		// don't forget to close file at the end
-		defer finalFile.Close()
-
-		// combine multiple chunk files into one final file
-		if err = f.CombineChunkFiles(ctx, request, finalFile); err != nil {
-			logger.Error(err)
-			return err
-		}
-
-		logger.Info("success combine files")
-
-		// validate check sum from final file
-		if err = finalFile.Sync(); err != nil {
-			logger.Error(err)
-			return err
-		}
-
-		fileInfo, err := finalFile.Stat()
-		if err != nil {
-			logger.Error(err)
-			return err
-		}
-
-		logrus.Infof("final file size : %d 🗂️", fileInfo.Size())
-
-		h := sha256.New()
-		if _, err = io.Copy(h, finalFile); err != nil {
-			logger.Error(err)
-			return err
-		}
-
-		// compare checksum
-		checkSumFinalFile := fmt.Sprintf("%x", h.Sum(nil))
-		if checkSumFinalFile != requestHeader.CheckSum {
-			logger.Infof("checksum from client : [%s]", requestHeader.CheckSum)
-			logger.Infof("checksum from server : [%s]", checkSumFinalFile)
-			_ = os.RemoveAll(fp)
-			return fmt.Errorf("invalid checksum")
-		}
-
-		// upload to Cloud
-		logger.Info("process upload final file to cloud")
-		logger.Info("success upload final file to cloud")
 	}
 
 	return nil
@@ -178,6 +138,79 @@ func (f *fileService) CheckAndCreateFolder(ctx context.Context, path string) err
 	return nil
 }
 
+// CreateChunkFile creates new chunk file
+func (f *fileService) CreateChunkFile(ctx context.Context, request entity.UploadChunkRequestServiceDTO) error {
+	ctx, span := gootel.RecordSpan(ctx)
+	defer span.End()
+
+	logger := logrus.WithContext(ctx)
+
+	// create new chunk file
+	chunkFilePath := fmt.Sprintf("%s/%s-chunk-%d", config.FolderUploadChunk(), request.RequestHeader.Filename, request.RequestHeader.ChunkIndex)
+	chunkFile, err := os.Create(chunkFilePath)
+	if err != nil {
+		logger.Error(err)
+		return err
+	}
+
+	// don't forget to close chunk file at the end
+	defer chunkFile.Close()
+
+	// write content to chunk file
+	if _, err = chunkFile.Write(request.Content.Bytes()); err != nil {
+		logger.Error(err)
+		return err
+	}
+
+	// sync chunk file
+	if err = chunkFile.Sync(); err != nil {
+		logger.Error(err)
+		return err
+	}
+
+	logger.Infof("success create chunk file [%s] 🗳️", chunkFilePath)
+	return nil
+}
+
+// CreateFinalFile creates new final file and combine from multiple chunk files into one final file
+func (f *fileService) CreateFinalFile(ctx context.Context, request entity.UploadChunkRequestServiceDTO) error {
+	ctx, span := gootel.RecordSpan(ctx)
+	defer span.End()
+
+	logger := logrus.WithContext(ctx)
+
+	// check folder final
+	if err := f.CheckAndCreateFolder(ctx, config.FolderUploadFinal()); err != nil {
+		logger.Error(err)
+		return err
+	}
+
+	finalFilePath := fmt.Sprintf("%s/%s", config.FolderUploadFinal(), request.RequestHeader.Filename)
+	if _, err := os.Stat(finalFilePath); err == nil {
+		logrus.Infof("final file already exists 📩")
+		return nil
+	}
+
+	// create new final file
+	finalFile, err := os.Create(finalFilePath)
+	if err != nil {
+		logger.Error(err)
+		return err
+	}
+
+	// don't forget to close file at the end
+	defer finalFile.Close()
+
+	// combine from multiple chunk files into one final file
+	if err = f.CombineChunkFiles(ctx, request, finalFile); err != nil {
+		logger.Error(err)
+		return err
+	}
+
+	logger.Infof("success create final file [%s] ✅", finalFilePath)
+	return nil
+}
+
 // CombineChunkFiles combines multiple chunk files into one final file
 func (f *fileService) CombineChunkFiles(ctx context.Context, request entity.UploadChunkRequestServiceDTO, finalFile *os.File) error {
 	ctx, span := gootel.RecordSpan(ctx)
@@ -185,7 +218,7 @@ func (f *fileService) CombineChunkFiles(ctx context.Context, request entity.Uplo
 
 	logger := logrus.WithContext(ctx)
 
-	// looping each chunk file
+	// looping each chunk files
 	for i := 0; i < request.RequestHeader.TotalChunk; i++ {
 		// open file chunk
 		chunkFilePath := fmt.Sprintf("%s/%s-chunk-%d", config.FolderUploadChunk(), request.RequestHeader.Filename, i)
@@ -216,14 +249,11 @@ func (f *fileService) CombineChunkFiles(ctx context.Context, request entity.Uplo
 		utils.ByteBufferPool.Put(buf)
 		_ = oneChunkFile.Close()
 
-		_ = os.RemoveAll(chunkFilePath)
-
-		// if any error
-		if err != nil {
+		// remove chunk file after append to final file
+		if err = os.RemoveAll(chunkFilePath); err != nil {
 			logger.Error(err)
 			return err
 		}
 	}
-
 	return nil
 }
