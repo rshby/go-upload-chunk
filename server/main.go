@@ -9,6 +9,14 @@ import (
 	"go-upload-chunk/server/config"
 	"go-upload-chunk/server/drivers/logger"
 	"go-upload-chunk/server/http/router"
+	ioOtel "go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/sdk/resource"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
+	"log"
 	"net/http"
 	"os"
 	"os/signal"
@@ -18,6 +26,16 @@ import (
 
 func main() {
 	logger.SetupLogger()
+
+	// connect to opentelemetry
+	traceProvider, err := NewTraceProvider(context.Background())
+	if err != nil {
+		logrus.Fatal(err)
+	}
+
+	defer func() {
+		_ = traceProvider.Shutdown(context.Background())
+	}()
 
 	app := gin.Default()
 	switch config.Mode() {
@@ -97,4 +115,40 @@ func gracefullShutdown(httpServer *http.Server) {
 		_ = httpServer.Close()
 		logrus.Infof("gracefull shutdown HTTP Server ❎")
 	}
+}
+
+// NewTraceProvider is to create trace provider
+func NewTraceProvider(ctx context.Context) (*sdktrace.TracerProvider, error) {
+	exp, err := otlptracegrpc.New(
+		ctx,
+		otlptracegrpc.WithInsecure(),
+		otlptracegrpc.WithEndpoint("localhost:4317"),
+		otlptracegrpc.WithCompressor("gzip"))
+	if err != nil {
+		log.Fatal(err)
+		return nil, err
+	}
+
+	r := resource.NewWithAttributes(
+		semconv.SchemaURL,
+		semconv.ServiceName("Go Upload Chunk"),
+		semconv.ServiceVersionKey.String("1.0.0"),
+		attribute.String("environment", config.Mode()),
+	)
+
+	tp := sdktrace.NewTracerProvider(
+		sdktrace.WithSampler(sdktrace.AlwaysSample()),
+		sdktrace.WithBatcher(exp),
+		sdktrace.WithResource(r),
+	)
+
+	ioOtel.SetTracerProvider(tp)
+
+	ioOtel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
+		propagation.TraceContext{},
+		propagation.Baggage{},
+	))
+
+	logrus.Info("success connect to Opentelemetry Trace Provider")
+	return tp, nil
 }

@@ -19,4 +19,5 @@ func SetupLogger() {
 	logrus.SetFormatter(&formatter)
 	logrus.SetOutput(os.Stdout)
 	logrus.SetLevel(logrus.InfoLevel)
+	logrus.AddHook(new(OtelTraceHook))
 }
