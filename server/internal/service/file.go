@@ -113,6 +113,8 @@ func (f *fileService) UploadChunk(ctx context.Context, request entity.UploadChun
 			logger.Error(err)
 			return err
 		}
+	} else {
+		logger.Infof("create chunk file %s only", request.RequestHeader.Filename)
 	}
 
 	return nil
@@ -222,38 +224,58 @@ func (f *fileService) CombineChunkFiles(ctx context.Context, request entity.Uplo
 	for i := 0; i < request.RequestHeader.TotalChunk; i++ {
 		// open file chunk
 		chunkFilePath := fmt.Sprintf("%s/%s-chunk-%d", config.FolderUploadChunk(), request.RequestHeader.Filename, i)
-		oneChunkFile, err := os.Open(chunkFilePath)
-		if err != nil {
-			logger.Error(err)
-			return err
-		}
-
-		logger.Infof("success open chunk file %s", chunkFilePath)
-
-		// get buffer from Pool
-		buf := utils.ByteBufferPool.Get().(*bytes.Buffer)
-
-		// copy content from chunk file to buffer
-		if _, err = io.Copy(buf, oneChunkFile); err == nil {
-			// write to final file
-			if _, err = finalFile.Write(buf.Bytes()); err == nil {
-				logger.Infof("success append chunk file [%s] to final file", chunkFilePath)
-			} else {
-				logger.Error(err)
-			}
-		} else {
-			logger.Error(err)
-		}
-
-		buf.Reset()
-		utils.ByteBufferPool.Put(buf)
-		_ = oneChunkFile.Close()
-
-		// remove chunk file after append to final file
-		if err = os.RemoveAll(chunkFilePath); err != nil {
+		if err := f.WriteChunkToFinalFile(ctx, chunkFilePath, finalFile); err != nil {
 			logger.Error(err)
 			return err
 		}
 	}
+
+	return nil
+}
+
+// WriteChunkToFinalFile writes content from chunk file to final file
+func (f *fileService) WriteChunkToFinalFile(ctx context.Context, chunkFilePath string, finalFile *os.File) error {
+	ctx, span := gootel.RecordSpan(ctx)
+	defer span.End()
+
+	logger := logrus.WithContext(ctx)
+
+	// open chunk file
+	chunkFile, err := os.Open(chunkFilePath)
+	if err != nil {
+		logger.Error(err)
+		return err
+	}
+
+	// don't forget to close chunk file at the end
+	defer chunkFile.Close()
+
+	// get buffer from Pool
+	buf := utils.ByteBufferPool.Get().(*bytes.Buffer)
+	defer func() {
+		buf.Reset()
+		utils.ByteBufferPool.Put(buf)
+	}()
+
+	// copy content from chunk file to buffer. chunk file will be empty after this
+	if _, err = io.Copy(buf, chunkFile); err != nil {
+		logger.Error(err)
+		return err
+	}
+
+	// write content from chunk file to final file
+	if _, err = finalFile.Write(buf.Bytes()); err != nil {
+		logger.Error(err)
+		return err
+	}
+
+	// remove chunk file after write
+	if err = os.RemoveAll(chunkFilePath); err != nil {
+		logger.Error(err)
+		return err
+	}
+
+	// success write
+	logger.Infof("success write from chunk file %s to final file", chunkFilePath)
 	return nil
 }
