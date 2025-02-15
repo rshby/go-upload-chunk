@@ -8,6 +8,7 @@ import (
 	"github.com/sirupsen/logrus"
 	"go-upload-chunk/server/config"
 	"go-upload-chunk/server/drivers/logger"
+	"go-upload-chunk/server/http/middleware"
 	"go-upload-chunk/server/http/router"
 	ioOtel "go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -44,6 +45,8 @@ func main() {
 	default:
 		gin.SetMode(gin.DebugMode)
 	}
+
+	app.Use(middleware.TraceMiddleware())
 
 	// init validator
 	validate := validator.New()

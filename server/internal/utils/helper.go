@@ -7,7 +7,7 @@ import (
 )
 
 var ByteBufferPool = &sync.Pool{New: func() any {
-	logrus.Info("create buffer from Pool")
+	logrus.Info("create buffer from Pool 📦")
 	b := &bytes.Buffer{}
 	return b
 }}
